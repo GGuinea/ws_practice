@@ -13,7 +13,7 @@ type chatRoom struct {
 }
 
 type Chat struct {
-	mutex   sync.RWMutex // consider rwmutex
+	mutex   sync.RWMutex 
 	rooms   map[string]*chatRoom
 	clients map[*websocket.Conn]*client
 }
@@ -22,24 +22,6 @@ func NewChat() *Chat {
 	return &Chat{
 		rooms:   make(map[string]*chatRoom),
 		clients: make(map[*websocket.Conn]*client),
-	}
-}
-
-func (c *Chat) CloseClient(conn *websocket.Conn) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	client, ok := c.clients[conn]
-	if !ok {
-		return
-	}
-	client.close <- struct{}{}
-	delete(c.clients, conn)
-	for _, clientRoom := range client.rooms {
-		for _, listener := range c.rooms[clientRoom].listeners {
-			if listener.conn == conn {
-				c.LeaveRoom(clientRoom, conn)
-			}
-		}
 	}
 }
 
@@ -114,10 +96,6 @@ func (c *Chat) HandleMessage(conn *websocket.Conn, wsMessgae *Message) error {
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 				return err
 			}
-			return err
-		}
-		resMessage := fmt.Sprintf("published message to room with name %s", string(wsMessgae.RoomName))
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 			return err
 		}
 	default:
@@ -196,8 +174,9 @@ func (c *Chat) JoinRoom(roomName string, conn *websocket.Conn) error {
 
 func (c *Chat) LeaveRoom(roomName string, conn *websocket.Conn) error {
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
 	room, ok := c.rooms[roomName]
-	c.mutex.Unlock()
 
 	if !ok {
 		return fmt.Errorf("Room not found")
@@ -215,8 +194,9 @@ func (c *Chat) LeaveRoom(roomName string, conn *websocket.Conn) error {
 
 func (c *Chat) PublishMessage(roomName string, message string) error {
 	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
 	room, ok := c.rooms[roomName]
-	c.mutex.RUnlock()
 
 	if !ok {
 		return fmt.Errorf("Room not found")
@@ -244,4 +224,24 @@ func (c *Chat) ListRooms() []string {
 	}
 
 	return rooms
+}
+
+func (c *Chat) CloseClient(conn *websocket.Conn) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	client, ok := c.clients[conn]
+	if !ok {
+		return
+	}
+
+	client.close <- struct{}{}
+	delete(c.clients, conn)
+
+	for _, clientRoom := range client.rooms {
+		for _, listener := range c.rooms[clientRoom].listeners {
+			if listener.conn == conn {
+				c.LeaveRoom(clientRoom, conn)
+			}
+		}
+	}
 }

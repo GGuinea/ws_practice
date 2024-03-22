@@ -22,6 +22,7 @@ func (c *client) writePump() {
 				log.Println("error reading from channel")
 				return
 			}
+
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				log.Println(err)
 				return
