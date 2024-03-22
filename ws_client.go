@@ -11,6 +11,7 @@ type client struct {
 	outMsgChan chan []byte
 	name       string
 	rooms      []string
+	close      chan struct{}
 }
 
 func (c *client) writePump() {
@@ -25,6 +26,8 @@ func (c *client) writePump() {
 				log.Println(err)
 				return
 			}
+		case <-c.close:
+			return
 		}
 	}
 }

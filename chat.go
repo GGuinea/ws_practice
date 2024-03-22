@@ -28,9 +28,13 @@ func NewChat() *Chat {
 func (c *Chat) CloseClient(conn *websocket.Conn) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	clientRooms := c.clients[conn].rooms
+	client, ok := c.clients[conn]
+	if !ok {
+		return
+	}
+	client.close <- struct{}{}
 	delete(c.clients, conn)
-	for _, clientRoom := range clientRooms {
+	for _, clientRoom := range client.rooms {
 		for _, listener := range c.rooms[clientRoom].listeners {
 			if listener.conn == conn {
 				c.LeaveRoom(clientRoom, conn)
@@ -137,7 +141,7 @@ func (c *Chat) RegisterNewWsClient(conn *websocket.Conn, userName string) error 
 		return fmt.Errorf("Already exists")
 	}
 
-	client := client{conn: conn, outMsgChan: make(chan []byte, 20), name: userName}
+	client := client{conn: conn, outMsgChan: make(chan []byte, 20), name: userName, close: make(chan struct{})}
 	go client.writePump()
 
 	c.clients[conn] = &client
