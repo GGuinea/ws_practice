@@ -25,6 +25,7 @@ func main() {
 		log.Fatal("ListenAndServe: ", err)
 	}
 }
+
 func serveWs(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -36,6 +37,7 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 		messageType, raw, err := conn.ReadMessage()
 
 		if err != nil {
+			chat.CloseClient(conn)
 			log.Println(err)
 			return
 		}
@@ -53,10 +55,6 @@ func serveWs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		err = chat.HandleMessage(conn, &message)
-		if err != nil {
-			log.Println(err.Error())
-			return
-		}
+		_ = chat.HandleMessage(conn, &message)
 	}
 }

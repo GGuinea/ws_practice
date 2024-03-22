@@ -12,31 +12,8 @@ type chatRoom struct {
 	listeners []*client
 }
 
-type client struct {
-	conn       *websocket.Conn
-	outMsgChan chan []byte
-	name       string
-}
-
-func (c *client) writePump() {
-	for {
-		select {
-		case message, ok := <-c.outMsgChan:
-			log.Println("writing message", message)
-			if !ok {
-				log.Println("error reading from channel")
-				return
-			}
-			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				log.Println(err)
-				return
-			}
-		}
-	}
-}
-
 type Chat struct {
-	mutex   sync.Mutex // consider rwmutex
+	mutex   sync.RWMutex // consider rwmutex
 	rooms   map[string]*chatRoom
 	clients map[*websocket.Conn]*client
 }
@@ -48,38 +25,47 @@ func NewChat() *Chat {
 	}
 }
 
-func writeMessage(conn *websocket.Conn, message []byte) error {
-	return conn.WriteMessage(websocket.TextMessage, message)
+func (c *Chat) CloseClient(conn *websocket.Conn) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	clientRooms := c.clients[conn].rooms
+	delete(c.clients, conn)
+	for _, clientRoom := range clientRooms {
+		for _, listener := range c.rooms[clientRoom].listeners {
+			if listener.conn == conn {
+				c.LeaveRoom(clientRoom, conn)
+			}
+		}
+	}
 }
 
-func (c *Chat) HandleMessage(conn *websocket.Conn, mess *Message) error {
-
-	switch mess.MessageType {
+func (c *Chat) HandleMessage(conn *websocket.Conn, wsMessgae *Message) error {
+	switch wsMessgae.MessageType {
 	case MessageTypeRegister:
-		err := c.Register(conn, mess.UserName)
+		err := c.RegisterNewWsClient(conn, wsMessgae.Data)
 		if err != nil {
-			resMessage := fmt.Sprintf("error registering user with name %s", mess.UserName)
+			resMessage := fmt.Sprintf("error registering user with name %s", wsMessgae.Data)
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 				return err
 			}
 			return err
 		}
 
-		resMessage := fmt.Sprintf("registered user with name %s", mess.UserName)
+		resMessage := fmt.Sprintf("registered user with name %s", wsMessgae.Data)
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 			return err
 		}
 	case MessageTypeCreateRoom:
-		err := c.CreateRoom(mess.Data)
+		err := c.CreateRoom(wsMessgae.RoomName)
 		if err != nil {
-			resMessage := fmt.Sprintf("error creating room with name %s", string(mess.Data))
+			resMessage := fmt.Sprintf("error creating room with name %s", string(wsMessgae.RoomName))
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 				return err
 			}
 			return err
 		}
 
-		resMessage := fmt.Sprintf("created room with name %s", string(mess.RoomName))
+		resMessage := fmt.Sprintf("created room with name %s", string(wsMessgae.RoomName))
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 			return err
 		}
@@ -90,32 +76,58 @@ func (c *Chat) HandleMessage(conn *websocket.Conn, mess *Message) error {
 			return err
 		}
 	case MessageTypeJoinRoom:
-		err := c.JoinRoom(mess.RoomName, conn)
+		err := c.JoinRoom(wsMessgae.RoomName, conn)
 		if err != nil {
 			log.Println(err)
-			resMessage := fmt.Sprintf("error joining room with name %s", string(mess.Data))
+			resMessage := fmt.Sprintf("error joining room with name %s", string(wsMessgae.RoomName))
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 				return err
 			}
 			return err
 		}
-		resMessage := fmt.Sprintf("joined room with name %s", string(mess.Data))
+		resMessage := fmt.Sprintf("joined room with name %s", string(wsMessgae.RoomName))
 		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
 			log.Println(err)
 			return err
 		}
 	case MessageTypeLeaveRoom:
-		// c.LeaveRoom(mess.Data)
+		err := c.LeaveRoom(wsMessgae.RoomName, conn)
+		if err != nil {
+			resMessage := fmt.Sprintf("error leaving room with name %s", string(wsMessgae.RoomName))
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
+				return err
+			}
+			return err
+		}
+		resMessage := fmt.Sprintf("left room with name %s", string(wsMessgae.RoomName))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
+			return err
+		}
 	case MessageTypeMessage:
-		c.Message(mess.RoomName, []byte(mess.Data))
+		err := c.PublishMessage(wsMessgae.RoomName, wsMessgae.Data)
+		if err != nil {
+			resMessage := fmt.Sprintf("error publishing message to room with name %s", string(wsMessgae.RoomName))
+			if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
+				return err
+			}
+			return err
+		}
+		resMessage := fmt.Sprintf("published message to room with name %s", string(wsMessgae.RoomName))
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
+			return err
+		}
 	default:
+		resMessage := fmt.Sprintf("invalid message type %s", wsMessgae.MessageType)
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(resMessage)); err != nil {
+			return err
+		}
 		return fmt.Errorf("Invalid message type")
 	}
 
 	return nil
 }
 
-func (c *Chat) Register(conn *websocket.Conn, name string) error {
+func (c *Chat) RegisterNewWsClient(conn *websocket.Conn, userName string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -125,7 +137,7 @@ func (c *Chat) Register(conn *websocket.Conn, name string) error {
 		return fmt.Errorf("Already exists")
 	}
 
-	client := client{conn: conn, outMsgChan: make(chan []byte), name: name}
+	client := client{conn: conn, outMsgChan: make(chan []byte, 20), name: userName}
 	go client.writePump()
 
 	c.clients[conn] = &client
@@ -133,11 +145,11 @@ func (c *Chat) Register(conn *websocket.Conn, name string) error {
 	return nil
 }
 
-func (c *Chat) CreateRoom(name string) error {
+func (c *Chat) CreateRoom(roomName string) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	_, ok := c.rooms[name]
+	_, ok := c.rooms[roomName]
 
 	if ok {
 		return fmt.Errorf("Already exists")
@@ -145,16 +157,16 @@ func (c *Chat) CreateRoom(name string) error {
 
 	room := chatRoom{}
 
-	c.rooms[name] = &room
+	c.rooms[roomName] = &room
 
 	return nil
 }
 
-func (c *Chat) JoinRoom(name string, conn *websocket.Conn) error {
+func (c *Chat) JoinRoom(roomName string, conn *websocket.Conn) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	room, ok := c.rooms[name]
+	room, ok := c.rooms[roomName]
 
 	if !ok {
 		return fmt.Errorf("Room not found")
@@ -173,15 +185,15 @@ func (c *Chat) JoinRoom(name string, conn *websocket.Conn) error {
 	}
 
 	room.listeners = append(room.listeners, client)
+	client.rooms = append(client.rooms, roomName)
 
 	return nil
 }
 
-func (c *Chat) LeaveRoom(name string, conn *websocket.Conn) error {
+func (c *Chat) LeaveRoom(roomName string, conn *websocket.Conn) error {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	room, ok := c.rooms[name]
+	room, ok := c.rooms[roomName]
+	c.mutex.Unlock()
 
 	if !ok {
 		return fmt.Errorf("Room not found")
@@ -197,26 +209,29 @@ func (c *Chat) LeaveRoom(name string, conn *websocket.Conn) error {
 	return nil
 }
 
-func (c *Chat) Message(name string, message []byte) error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	room, ok := c.rooms[name]
+func (c *Chat) PublishMessage(roomName string, message string) error {
+	c.mutex.RLock()
+	room, ok := c.rooms[roomName]
+	c.mutex.RUnlock()
 
 	if !ok {
 		return fmt.Errorf("Room not found")
 	}
 
 	for _, listener := range room.listeners {
-		listener.outMsgChan <- message
+		select {
+		case listener.outMsgChan <- []byte(message):
+		default:
+			log.Println("Cannot publish for: ", listener.name)
+		}
 	}
 
 	return nil
 }
 
 func (c *Chat) ListRooms() []string {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
 
 	rooms := make([]string, 0, len(c.rooms))
 
@@ -225,10 +240,4 @@ func (c *Chat) ListRooms() []string {
 	}
 
 	return rooms
-}
-
-func (c *Chat) Run() {
-	for {
-
-	}
 }
